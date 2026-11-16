@@ -1,0 +1,14 @@
+# Secrets: never commit these
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editors and systems
+.DS_Store
+Thumbs.db
