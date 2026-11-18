@@ -20,11 +20,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-DOCTOR_VERSION = "1.0.0"
+DOCTOR_VERSION = "1.1.0"
 ROOT = Path(__file__).resolve().parent.parent
 REPORT = ROOT / "setup" / "report.json"
-MODEL = "claude-haiku-5-5"
-PACKAGES = ["anthropic", "tiktoken", "requests"]
+MODEL = "gpt-6-luna"
+PACKAGES = ["openai", "tiktoken", "requests"]
 
 checks = []
 model_call = None
@@ -99,7 +99,7 @@ def check_tokenizer():
     try:
         import tiktoken
         tokens = tiktoken.get_encoding("o200k_base").encode("Hello, world!")
-        record("tokenizer", True, f"o200k_base loaded ({len(tokens)} tokens in 'Hello, world!')")
+        record("tokenizer", True, f"o200k_base loaded ({len(tokens)} tokens in 'Hello, world!'; practice encoding, not a verified Luna count)")
     except Exception as err:
         record("tokenizer", False, f"couldn't load o200k_base: {type(err).__name__}: {err}",
                "tiktoken downloads the tokenizer once. Check your internet connection and run the doctor again.", 6)
@@ -160,20 +160,20 @@ def expected_gateway_host():
 
 
 def check_api_settings():
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+    key = os.environ.get("OPENAI_API_KEY", "")
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
     problems = []
     if not key:
-        problems.append("ANTHROPIC_API_KEY isn't set")
+        problems.append("OPENAI_API_KEY isn't set")
     if not base_url:
-        problems.append("ANTHROPIC_BASE_URL isn't set")
+        problems.append("OPENAI_BASE_URL isn't set")
     else:
         parsed = urlparse(base_url)
         host = expected_gateway_host()
         if parsed.scheme != "https":
-            problems.append("ANTHROPIC_BASE_URL must start with https://")
+            problems.append("OPENAI_BASE_URL must start with https://")
         elif host and parsed.hostname != host:
-            problems.append(f"ANTHROPIC_BASE_URL points to {parsed.hostname}, not the course gateway {host}")
+            problems.append(f"OPENAI_BASE_URL points to {parsed.hostname}, not the course gateway {host}")
     if problems:
         record("api_settings", False, "; ".join(problems),
                "Run the doctor with `--env-file .env`, and check both values in .env against the platform. "
@@ -187,48 +187,52 @@ def check_api_settings():
 def check_model_call():
     global model_call
     try:
-        import anthropic
+        import openai
     except ImportError:
-        record("model_call", False, "anthropic isn't installed", "Run `uv sync`.", 6)
+        record("model_call", False, "openai isn't installed", "Run `uv sync`.", 6)
         return
-    client = anthropic.Anthropic(max_retries=1, timeout=30)
+    client = openai.OpenAI(max_retries=1, timeout=30)
     start = time.perf_counter()
     try:
-        message = client.messages.create(
+        message = client.chat.completions.create(
             model=MODEL,
-            max_tokens=5,
+            max_completion_tokens=32,
+            reasoning_effort="none",
             messages=[{"role": "user", "content": "Reply with the single word: ready"}],
         )
-    except anthropic.AuthenticationError:
+    except openai.AuthenticationError:
         record("model_call", False, "the gateway rejected your key (401)",
                "Copy your key from the platform into .env again. If it still fails, create a new key.", 7)
         return
-    except anthropic.PermissionDeniedError:
+    except openai.PermissionDeniedError:
         record("model_call", False, "your key isn't allowed to make this request (403)",
                "Check your key's status and spending on the platform.", 7)
         return
-    except anthropic.APIConnectionError as err:
+    except openai.APIConnectionError as err:
         record("model_call", False, f"couldn't reach {client.base_url}: {err}",
-               "Check ANTHROPIC_BASE_URL in .env and your internet connection.", 7)
+               "Check OPENAI_BASE_URL in .env and your internet connection.", 7)
         return
-    except anthropic.APIStatusError as err:
+    except openai.APIStatusError as err:
         record("model_call", False, f"the gateway returned {err.status_code}: {err.message}",
                "Wait a minute and run the doctor again. If it keeps failing, ask for help with your report.", 1)
         return
     latency_ms = round((time.perf_counter() - start) * 1000)
-    text = "".join(block.text for block in message.content if block.type == "text").strip()
+    text = (message.choices[0].message.content or "").strip()
+    if not text or message.choices[0].finish_reason != "stop":
+        record("model_call", False, "the model returned no complete text answer", "Run the doctor again.", 7)
+        return
     model_call = {
         "request_id": message.id,
         "model": message.model,
-        "stop_reason": message.stop_reason,
-        "input_tokens": message.usage.input_tokens,
-        "output_tokens": message.usage.output_tokens,
+        "finish_reason": message.choices[0].finish_reason,
+        "input_tokens": message.usage.prompt_tokens,
+        "output_tokens": message.usage.completion_tokens,
         "latency_ms": latency_ms,
         "reply": text[:40],
     }
     record("model_call", True,
            f"{message.model} replied {text!r} in {latency_ms} ms "
-           f"({message.usage.input_tokens} tokens in, {message.usage.output_tokens} out, request {message.id})")
+           f"({message.usage.prompt_tokens} tokens in, {message.usage.completion_tokens} out, completion {message.id})")
 
 
 def environment():
